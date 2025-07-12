@@ -1,0 +1,127 @@
+# 🧭 Vorgehensweise – Meta Firma KI-System für 1A Montagehelden
+Technische Übersetzung deiner intuitiven Logik  
+Stand: Architekturphase / Meta Raum
+
+---
+
+🔧 1. Alle benötigten KI-Modelle einbetten / herunterladen
+
+Ziel: Alle Modelle lokal verfügbar machen (offline-fähig, stabil)
+
+Modell            | Zweck                               | Status
+------------------|--------------------------------------|--------
+Whisper (base)    | Sprache → Text (Transkription)       | ✅ vorhanden
+llama3.1:8b       | Intent-Erkennung + Inhaltserzeugung  | ✅ vorhanden (Ollama)
+openhermes        | Rückfragen, sanfter Stil (optional)  | 🟡 optional
+warnlogik         | Ampelsystem / Fehlererkennung        | 🔴 noch offen
+
+Befehl zur Einbettung:
+    ollama pull llama3:8b
+    ollama pull whisper
+    ollama pull openhermes
+
+---
+
+🧩 2. Für jedes Modell Module bauen, die Trigger und Aufgaben übernehmen
+
+Prinzip: Pro Anwendung ein KI-Modul mit passender Aufgabe
+
+Modul                  | Zweck                                  | KI         | Status
+------------------------|----------------------------------------|------------|---------
+route_intent()          | Erkennen, was der Monteur meint        | llama3.1   | ✅ vorhanden
+create_bautagebuch()    | Bautagebuch strukturieren              | llama3.1   | ✅ vorhanden
+create_stundenzettel()  | Stundenbuchung strukturieren           | llama3.1   | ✅ vorhanden
+query_planung()         | Geplante vs. gemeldete Arbeiten (Excel)| vorbereitet| 🟡 teilweise
+warnungschecker()       | Ampelstatus aus Text erkennen          | (geplant)  | 🔴 fehlt noch
+
+---
+
+📁 3. Trigger bauen, die auf Prompts verweisen
+
+Ziel: Steuerung über zentrale Prompt-Dateien
+
+Vorgeschlagene Struktur:
+    prompts/
+    ├── router.txt
+    ├── bautagebuch.txt
+    ├── stundenzettel.txt
+    ├── warnlogik.txt
+
+Prompt-Loader im Code:
+    with open("prompts/bautagebuch.txt", "r", encoding="utf-8") as f:
+        prompt = f.read()
+
+---
+
+🧠 4. Signaturbasierte Steuerung – Bedeutungsräume hinterlegen
+
+Ziel: KI erkennt, welche Wörter mit welchen Aktionen verknüpft sind
+
+Beispiel-Datei: signaturen.json
+    {
+      "bautagebuch": {
+        "synonyme": ["baustelle", "baufortschritt", "heute passiert"],
+        "verknüpft_mit": ["projekt", "datum", "wetter", "arbeiten"]
+      },
+      "material": {
+        "synonyme": ["lieferung", "geliefert", "bestellt"],
+        "verknüpft_mit": ["projekt", "material", "menge"]
+      }
+    }
+
+Ein Modul namens signatur_parser.py gleicht die gesprochenen Texte gegen diese Bedeutungsräume ab.
+
+---
+
+📲 5. Interface bauen (Handy & Büro)
+
+Mitarbeiter-Frontend (Handy):
+- Dropdown: Projekt wählen
+- Sprache aufnehmen
+- Feedback anzeigen: „Erfolgreich gespeichert“ oder Fehlermeldung
+
+Büro-UI (z. B. Andrea):
+- Anzeige: Ampelansicht (rot/gelb/grün)
+- Projektliste mit Prioritäten
+- Rückfragen möglich wie „Was wurde zuletzt in Projekt XY gemeldet?“
+
+---
+
+🧪 6. Testlauf und Abschluss
+
+Testablauf:
+1. Testprojekt anlegen
+2. Typische Spracheingaben von Monteuren simulieren
+3. Dateien prüfen: richtig erstellt? Inhalt korrekt?
+4. Büroprozess durchspielen: Ampel reagiert? Relevanz erkannt?
+
+---
+
+✅ Was bereits vorhanden ist (Produktionsraum)
+
+Komponente              | Datei / Modul                              | Status
+------------------------|---------------------------------------------|--------
+Sprachaufnahme-Frontend | voice_interface_Interface_Monteure.md       | ✅ vorhanden
+FastAPI Server          | main.py, requirements.txt                  | ✅ vorhanden
+Audio-Upload            | /voice/upload                               | ✅ vorhanden
+Whisper-Transkription   | voice to document system hauptarchitektur   | ✅ vorhanden
+Ollama-Anbindung        | route_intent() & Unterfunktionen            | ✅ vorhanden
+Modulstruktur           | create_bautagebuch(), ...                   | ✅ vorhanden
+Planungseinbindung      | query_planung()                             | 🟡 vorbereitet
+Ampelsystem (Andrea)    | —                                           | 🔴 fehlt noch
+Signaturlogik           | —                                           | 🟡 in Vorbereitung
+
+---
+
+💡 Nächste sinnvolle Bauschritte
+
+1. prompts/-Ordner mit externen .txt-Dateien einrichten
+2. Prompt-Loader als Utility einbauen
+3. signaturen.json erstellen und mit Parsermodul verknüpfen
+4. warnlogik.txt + warnungschecker() Modul für Ampelstatus
+5. Frontend: Projektwahl-Dropdown ergänzen (vor Aufnahme)
+6. Rückfrage-Modul vorbereiten („Gib mir Datei vom...“)
+
+---
+
+Ende Übersicht – bereit zur Ablage im Produktionsraum.

@@ -1,0 +1,294 @@
+"""
+Meta-Baufirma Voice-to-Document System
+Hauptarchitektur für Spracheingabe zu automatischer Dokumentenerstellung
+"""
+
+import whisper
+import requests
+import json
+import re
+from datetime import datetime, timedelta
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
+import pandas as pd
+import os
+from pathlib import Path
+
+app = FastAPI(title="Meta-Baufirma Voice System")
+
+# Konfiguration
+OLLAMA_URL = "http://localhost:11434/api/generate"
+SHARED_FOLDER = "/volume1/shared_folder"
+WHISPER_MODEL = whisper.load_model("base")
+
+# Trigger-Definitionen für Module
+TRIGGER_MODULES = {
+    "bautagebuch": {
+        "keywords": ["bautagebuch", "baustelle", "heute passiert", "baufortschritt"],
+        "module": "create_bautagebuch",
+        "required_fields": ["projekt", "datum", "inhalt"]
+    },
+    "stundenzettel": {
+        "keywords": ["stunden", "arbeitszeit", "von bis", "gearbeitet", "krank"],
+        "module": "create_stundenzettel", 
+        "required_fields": ["mitarbeiter", "datum", "stunden"]
+    },
+    "planung": {
+        "keywords": ["wo ist", "eingeplant", "kalender", "terminplan"],
+        "module": "query_planung",
+        "required_fields": ["mitarbeiter", "zeitraum"]
+    },
+    "kundenvermerk": {
+        "keywords": ["kunde", "beschwerde", "gespräch", "telefonat"],
+        "module": "create_kundenvermerk",
+        "required_fields": ["kunde", "inhalt", "datum"]
+    },
+    "material": {
+        "keywords": ["material", "bestellt", "geliefert", "lieferung"],
+        "module": "material_management",
+        "required_fields": ["material", "menge", "projekt"]
+    },
+    "multi_task": {
+        "keywords": ["zusätzlich", "außerdem", "und noch"],
+        "module": "process_multiple",
+        "required_fields": []
+    }
+}
+
+# System-Prompts für KI-Module
+SYSTEM_PROMPTS = {
+    "router": """
+Du bist ein intelligenter Router für Baustellenkommunikation.
+Analysiere die Spracheingabe und erkenne:
+1. Welche Module/Trigger aktiviert werden sollen
+2. Welche Daten extrahiert werden müssen
+3. Ob mehrere Aufgaben in einer Eingabe sind
+
+Antworte nur in folgendem JSON-Format:
+{
+    "modules": ["modul1", "modul2"],
+    "extracted_data": {
+        "projekt": "...",
+        "datum": "...",
+        "mitarbeiter": "...",
+        "inhalt": "..."
+    },
+    "confidence": 0.95
+}
+""",
+    
+    "bautagebuch": """
+Du erstellst strukturierte Bautagebuch-Einträge.
+Extrahiere aus der Eingabe:
+- Projektname
+- Datum
+- Wetter (falls erwähnt)
+- Arbeiten durchgeführt
+- Besondere Vorkommnisse
+- Anwesende Mitarbeiter
+- Material-/Maschinenverbrauch
+
+Format: Professioneller Bautagebuch-Eintrag
+""",
+
+    "stundenzettel": """
+Du erstellst Stundenzettel-Einträge.
+Extrahiere:
+- Mitarbeitername
+- Datum
+- Arbeitszeit (von-bis oder Stunden gesamt)
+- Tätigkeit/Projekt
+- Besonderheiten (Krank, Urlaub, etc.)
+
+Format: Strukturierter Stundenzettel-Eintrag
+""",
+
+    "planung": """
+Du suchst in Planungsdaten nach Mitarbeiter-Terminen.
+Analysiere die Anfrage nach:
+- Mitarbeitername
+- Zeitraum (KW, Datum, etc.)
+- Gesuchte Information
+
+Durchsuche die Planungsdateien und gib konkrete Antworten.
+"""
+}
+
+class VoiceDocumentProcessor:
+    def __init__(self):
+        self.whisper_model = WHISPER_MODEL
+        
+    async def process_voice_input(self, audio_file):
+        """Hauptverarbeitungsschleife für Spracheingaben"""
+        
+        # 1. Sprache zu Text
+        transcription = self.transcribe_audio(audio_file)
+        
+        # 2. Intent-Erkennung und Routing
+        routing_result = await self.route_intent(transcription)
+        
+        # 3. Module ausführen
+        results = []
+        for module in routing_result["modules"]:
+            result = await self.execute_module(
+                module, 
+                transcription, 
+                routing_result["extracted_data"]
+            )
+            results.append(result)
+        
+        # 4. Antwort generieren
+        response = self.generate_response(results)
+        
+        return {
+            "transcription": transcription,
+            "actions_taken": results,
+            "response": response
+        }
+    
+    def transcribe_audio(self, audio_file):
+        """Whisper Transcription"""
+        result = self.whisper_model.transcribe(audio_file)
+        return result["text"]
+    
+    async def route_intent(self, text):
+        """KI-basiertes Intent-Routing"""
+        prompt = f"{SYSTEM_PROMPTS['router']}\n\nEingabe: {text}"
+        
+        response = requests.post(OLLAMA_URL, json={
+            "model": "llama3.1:8b",
+            "prompt": prompt,
+            "stream": False
+        })
+        
+        # Parse JSON response from KI
+        try:
+            result = json.loads(response.json()["response"])
+            return result
+        except:
+            # Fallback: Keyword-basiertes Routing
+            return self.fallback_routing(text)
+    
+    def fallback_routing(self, text):
+        """Fallback-Routing bei KI-Fehlern"""
+        text_lower = text.lower()
+        detected_modules = []
+        
+        for module, config in TRIGGER_MODULES.items():
+            if any(keyword in text_lower for keyword in config["keywords"]):
+                detected_modules.append(module)
+        
+        return {
+            "modules": detected_modules,
+            "extracted_data": self.extract_basic_data(text),
+            "confidence": 0.7
+        }
+    
+    async def execute_module(self, module_name, original_text, extracted_data):
+        """Führt spezifische Module aus"""
+        
+        if module_name == "bautagebuch":
+            return await self.create_bautagebuch(original_text, extracted_data)
+            
+        elif module_name == "stundenzettel":
+            return await self.create_stundenzettel(original_text, extracted_data)
+            
+        elif module_name == "planung":
+            return await self.query_planung(original_text, extracted_data)
+            
+        elif module_name == "kundenvermerk":
+            return await self.create_kundenvermerk(original_text, extracted_data)
+            
+        elif module_name == "material":
+            return await self.material_management(original_text, extracted_data)
+        
+        return {"error": f"Unbekanntes Modul: {module_name}"}
+    
+    async def create_bautagebuch(self, text, data):
+        """Bautagebuch-Erstellung"""
+        prompt = f"{SYSTEM_PROMPTS['bautagebuch']}\n\nEingabe: {text}"
+        
+        # KI-Verarbeitung
+        response = requests.post(OLLAMA_URL, json={
+            "model": "llama3.1:8b", 
+            "prompt": prompt,
+            "stream": False
+        })
+        
+        structured_entry = response.json()["response"]
+        
+        # Datei erstellen
+        projekt = data.get("projekt", "Unbekannt")
+        datum = data.get("datum", datetime.now().strftime("%Y-%m-%d"))
+        
+        filename = f"{SHARED_FOLDER}/bautagebuecher/{projekt}/bautagebuch_{datum}.txt"
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(structured_entry)
+        
+        return {
+            "action": "bautagebuch_created",
+            "file": filename,
+            "content": structured_entry
+        }
+    
+    async def query_planung(self, text, data):
+        """Planungsabfrage"""
+        # Planungsdateien laden
+        planning_files = list(Path(f"{SHARED_FOLDER}/planung").glob("*.xlsx"))
+        
+        results = []
+        for file in planning_files:
+            df = pd.read_excel(file)
+            # Suche nach Mitarbeiter in Planungsdaten
+            # ... komplexe Suchlogik ...
+            
+        return {
+            "action": "planung_query",
+            "results": results
+        }
+    
+    def generate_response(self, results):
+        """Generiert Antwort für Benutzer"""
+        if not results:
+            return "Ich konnte keine Aktion ausführen."
+        
+        responses = []
+        for result in results:
+            if result["action"] == "bautagebuch_created":
+                responses.append(f"Bautagebuch wurde erstellt: {result['file']}")
+            elif result["action"] == "stundenzettel_created":
+                responses.append(f"Stundenzettel wurde angelegt")
+            # ... weitere Aktionen
+        
+        return " ".join(responses)
+
+# FastAPI Endpoints
+processor = VoiceDocumentProcessor()
+
+@app.post("/voice/upload")
+async def upload_voice(audio: UploadFile = File(...)):
+    """Spracheingabe verarbeiten"""
+    
+    # Audio-Datei temporär speichern
+    temp_path = f"/tmp/{audio.filename}"
+    with open(temp_path, "wb") as f:
+        content = await audio.read()
+        f.write(content)
+    
+    # Verarbeitung
+    result = await processor.process_voice_input(temp_path)
+    
+    # Aufräumen
+    os.remove(temp_path)
+    
+    return JSONResponse(result)
+
+@app.get("/")
+def root():
+    return {"message": "Meta-Baufirma Voice System ist aktiv"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
