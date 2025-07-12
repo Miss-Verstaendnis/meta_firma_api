@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
 requests 
-PyMuPDF
+PyMuPDF==1.23.7
+
 
